@@ -255,12 +255,6 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 # TELEBRAS • Checklist Operacional (Premium / Elegant)
 # =========================================================
 
-st.set_page_config(
-    page_title="TELEBRAS • Checklist Operacional",
-    layout="wide",
-    page_icon="📡",
-    initial_sidebar_state="expanded",
-)
 
 _hide_streamlit_fullscreen_and_deploy_buttons()
 
