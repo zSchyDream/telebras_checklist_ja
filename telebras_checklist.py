@@ -2822,11 +2822,21 @@ def _ensure_schema(conn) -> None:
 
 
 
-def init_db():
-    """Abre conexão, garante schema e retorna a conexão."""
+@st.cache_resource(show_spinner=False)
+def _schema_done():
+    """Roda _ensure_schema apenas uma vez por instância do servidor."""
     conn = get_pg_conn()
-    _ensure_schema(conn)
-    return conn
+    try:
+        _ensure_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+def init_db():
+    """Garante schema (só na primeira vez) e retorna conexão nova."""
+    _schema_done()
+    return get_pg_conn()
 
 def get_client_ip() -> Optional[str]:
     """
@@ -5890,14 +5900,23 @@ def render_category(name: str, key: str, emoji_icon: str):
         st.write("")
         st.write("")
         filter_date_str = data_turno.strftime("%d/%m/%Y")
-        pdf_bytes = gerar_pdf_categoria(conn, key, name, meta, filter_date=filter_date_str)
-        st.download_button(
-            label="Exportar PDF",
-            data=pdf_bytes,
-            file_name=f"relatorio_{key}_{data_turno.strftime('%Y%m%d')}.pdf",
-            mime="application/pdf",
-            use_container_width=True,
-        )
+        _pdf_key = f"_pdf_cat_{key}"
+        _pdf_nome_key = f"_pdf_cat_nome_{key}"
+        if st.button("Exportar PDF", key=f"btn_export_pdf_{key}", use_container_width=True):
+            with st.spinner("Gerando PDF..."):
+                pdf_bytes = gerar_pdf_categoria(conn, key, name, meta, filter_date=filter_date_str)
+                st.session_state[_pdf_key] = pdf_bytes
+                st.session_state[_pdf_nome_key] = f"relatorio_{key}_{data_turno.strftime('%Y%m%d')}.pdf"
+                st.rerun()
+        if st.session_state.get(_pdf_key):
+            st.download_button(
+                label="⬇ Baixar PDF",
+                data=st.session_state[_pdf_key],
+                file_name=st.session_state.get(_pdf_nome_key, f"relatorio_{key}.pdf"),
+                mime="application/pdf",
+                use_container_width=True,
+                key=f"dl_pdf_{key}"
+            )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
