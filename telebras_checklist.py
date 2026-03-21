@@ -4243,7 +4243,6 @@ def render_login_page():
         if st.button('Entrar no Sistema', type='primary', use_container_width=True):
             if username and password:
                 loader_slot.markdown('<div class="login-loader">Validando acesso...</div>', unsafe_allow_html=True)
-                time.sleep(0.6)
                 user = authenticate(username, password)
                 loader_slot.empty()
                 if user:
@@ -4258,7 +4257,6 @@ def render_login_page():
                         st.session_state.page = st.session_state['pre_expire_page']
                     st.session_state.pop('pre_expire_page', None)
                     st.success(f"Bem-vindo, {user['full_name']}!")
-                    time.sleep(0.4)
                     st.rerun()
                 else:
                     st.error('Usuário ou senha incorretos')
@@ -4330,7 +4328,6 @@ def render_change_password_page():
                     st.session_state.user['first_login'] = False
                     st.session_state.user['password_hash'] = hash_password(new_password)
                     st.success('✅ Senha alterada com sucesso! Redirecionando...')
-                    time.sleep(0.6)
                     st.session_state.page = 'dashboard'
                     st.rerun()
                 except Exception as e:
@@ -4510,7 +4507,6 @@ def render_users_management():
                         ok, msg = delete_user(user_id, current_user['id'], current_role)
                         if ok:
                             st.success(msg)
-                            time.sleep(0.4)
                             st.rerun()
                         else:
                             st.error(msg)
@@ -4685,7 +4681,6 @@ def render_users_management():
             st.success(f'✅ Usuário **{_un}** criado com sucesso!')
             for _k in ('_nu_username', '_nu_fullname', 'input_new_user_senha'):
                 st.session_state.pop(_k, None)
-            time.sleep(0.4)
             st.rerun()
         else:
             st.error('Erro: usuário já existe.')
@@ -5127,17 +5122,24 @@ def render_app_sidebar():
                     st.session_state.page = "audit"
                     st.rerun()
 
-            # Exportar Relatório — mesmo estilo visual dos outros botões da sidebar
-            conn_sidebar = init_db()
-            pdf_geral = gerar_pdf_geral(conn_sidebar)
-            st.download_button(
-                label="Exportar Relatório",
-                data=pdf_geral,
-                file_name=f"relatorio_geral_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                key="sidebar_export_geral"
-            )
+            # Exportar Relatório — gera PDF só quando clicado
+            if st.button("Exportar Relatório", key="sidebar_export_geral_btn", use_container_width=True):
+                with st.spinner("Gerando relatório..."):
+                    conn_sidebar = init_db()
+                    pdf_geral = gerar_pdf_geral(conn_sidebar)
+                    conn_sidebar.close()
+                    st.session_state['_pdf_geral_bytes'] = pdf_geral
+                    st.session_state['_pdf_geral_nome'] = f"relatorio_geral_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+                    st.rerun()
+            if st.session_state.get('_pdf_geral_bytes'):
+                st.download_button(
+                    label="⬇ Baixar Relatório",
+                    data=st.session_state['_pdf_geral_bytes'],
+                    file_name=st.session_state.get('_pdf_geral_nome', 'relatorio.pdf'),
+                    mime="application/pdf",
+                    use_container_width=True,
+                    key="sidebar_export_geral_dl"
+                )
 
         # -- Separador antes do perfil
         st.markdown(
@@ -6606,7 +6608,6 @@ def render_category(name: str, key: str, emoji_icon: str):
                             )
                             st.session_state[_transfer_panel_key] = False
                             st.success(msg)
-                            time.sleep(0.4)
                             st.rerun()
                         else:
                             st.error(msg)
