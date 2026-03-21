@@ -2366,26 +2366,18 @@ def get_database_url() -> str:
     return url
 
 
-@st.cache_resource(show_spinner=False)
-def _get_connection_pool():
-    """Pool de conexões persistente — criado uma vez por sessão do servidor."""
-    from psycopg2 import pool as pg_pool
-    url = get_database_url()
-    return pg_pool.ThreadedConnectionPool(minconn=1, maxconn=5, dsn=url)
-
 def get_pg_conn() -> psycopg2.extensions.connection:
-    """Retorna uma conexão do pool (muito mais rápido que abrir nova conexão)."""
-    _pool = _get_connection_pool()
-    conn = _pool.getconn()
+    """Abre uma conexão direta ao Neon (simples e confiável)."""
+    url = get_database_url()
+    conn = psycopg2.connect(url)
     conn.autocommit = False
     return conn
 
 def release_pg_conn(conn) -> None:
-    """Devolve a conexão ao pool após uso."""
+    """Fecha a conexão após uso."""
     try:
         if conn and not conn.closed:
-            conn.rollback()
-            _get_connection_pool().putconn(conn)
+            conn.close()
     except Exception:
         pass
 
@@ -2862,7 +2854,7 @@ def _schema_initialized():
     return True
 
 def init_db():
-    """Garante schema (cacheado) e retorna nova conexão do pool."""
+    """Garante schema (cacheado) e retorna nova conexão direta."""
     _schema_initialized()
     return get_pg_conn()
 
