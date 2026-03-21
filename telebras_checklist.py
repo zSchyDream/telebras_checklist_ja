@@ -2367,19 +2367,12 @@ def get_database_url() -> str:
 
 
 def get_pg_conn() -> psycopg2.extensions.connection:
-    """Abre uma conexão direta ao Neon (simples e confiável)."""
+    """Retorna uma conexão psycopg2 com o Neon PostgreSQL."""
     url = get_database_url()
     conn = psycopg2.connect(url)
     conn.autocommit = False
     return conn
 
-def release_pg_conn(conn) -> None:
-    """Fecha a conexão após uso."""
-    try:
-        if conn and not conn.closed:
-            conn.close()
-    except Exception:
-        pass
 
 STATUS_OPTS = ["Aberto", "Em andamento", "Fechado"]
 CRIT_OPTS = ["Baixa", "Média", "Alta", "Crítica"]
@@ -2528,27 +2521,11 @@ def fetch_all_tickets_cached() -> List[Dict[str, Any]]:
             out.append(d)
         return out
     finally:
-        release_pg_conn(conn)
+        conn.close()
 
 def fetch_all_tickets(conn: psycopg2.extensions.connection) -> List[Dict[str, Any]]:
     return fetch_all_tickets_cached()
 
-def _fetch_all_orig(conn):
-    _cur = conn.cursor()
-
-    _cur.execute(
-        """
-        SELECT id, category, ticket_number, status, criticidade, responsavel, equipamento,
-               id_estacao, descricao, acao_tomada, pendencia, criterios, politica, correlatos,
-               observacoes, extra, created_at
-        FROM tickets
-        ORDER BY id DESC
-        """
-    )
-
-    rows = _cur.fetchall()
-
-    _cur.close()
     cols = [
         "id","category","ticket_number","status","criticidade","responsavel","equipamento","id_estacao",
         "descricao","acao_tomada","pendencia","criterios","politica","correlatos","observacoes","extra","created_at"
@@ -2842,22 +2819,14 @@ def _ensure_schema(conn) -> None:
     cur.close()
 
 
-@st.cache_resource(show_spinner=False)
-def _schema_initialized():
-    """Garante que o schema foi criado — roda apenas uma vez por instância do servidor."""
-    conn = get_pg_conn()
-    try:
-        _ensure_schema(conn)
-        conn.commit()
-    finally:
-        release_pg_conn(conn)
-    return True
+
+
 
 def init_db():
-    """Garante schema (cacheado) e retorna nova conexão direta."""
-    _schema_initialized()
-    return get_pg_conn()
-
+    """Abre conexão, garante schema e retorna a conexão."""
+    conn = get_pg_conn()
+    _ensure_schema(conn)
+    return conn
 
 def get_client_ip() -> Optional[str]:
     """
@@ -2975,7 +2944,7 @@ def log_audit(
         pass
     finally:
         if _conn:
-            release_pg_conn(_conn)
+            _conn.close()
 
 
 @st.cache_data(ttl=4, show_spinner=False)
@@ -2993,7 +2962,7 @@ def fetch_counts_cached() -> Dict[str, int]:
             out[cat] = int(c)
         return out
     finally:
-        release_pg_conn(conn)
+        conn.close()
 
 def fetch_counts(conn: psycopg2.extensions.connection) -> Dict[str, int]:
     return fetch_counts_cached()
@@ -3037,19 +3006,11 @@ def fetch_tickets_cached(category: str) -> List[Dict[str, Any]]:
             out.append(d)
         return out
     finally:
-        release_pg_conn(conn)
+        conn.close()
 
 def fetch_tickets(conn: psycopg2.extensions.connection, category: str) -> List[Dict[str, Any]]:
     return fetch_tickets_cached(category)
 
-def _invalidate_cache():
-    """Invalida todos os caches de leitura após escrita."""
-    fetch_counts_cached.clear()
-    fetch_tickets_cached.clear()
-    try:
-        fetch_all_tickets_cached.clear()
-    except Exception:
-        pass
 
 def fetch_tickets_fresh(category: str) -> List[Dict[str, Any]]:
     """Busca tickets sem cache — usar após salvar/editar/deletar."""
@@ -3084,25 +3045,8 @@ def fetch_tickets_fresh(category: str) -> List[Dict[str, Any]]:
             out.append(d)
         return out
     finally:
-        release_pg_conn(conn)
+        conn.close()
 
-def _orig_fetch_tickets(conn, category):
-    _cur = conn.cursor()
-    _cur.execute(
-        """
-        SELECT id, category, ticket_number, status, criticidade, responsavel, equipamento,
-               id_estacao, descricao, acao_tomada, pendencia, criterios, politica, correlatos,
-               observacoes, extra, created_at
-        FROM tickets
-        WHERE category = %s
-        ORDER BY id DESC
-        """,
-        (category,),
-    )
-
-    rows = _cur.fetchall()
-
-    _cur.close()
     cols = [
         "id",
         "category",
@@ -3191,7 +3135,6 @@ def upsert_ticket(conn: psycopg2.extensions.connection, payload: Dict[str, Any],
         )
     cur.close()
     conn.commit()
-    _invalidate_cache()
 
 def delete_ticket(conn: psycopg2.extensions.connection, ticket_id: int) -> None:
     _cur = conn.cursor()
@@ -3200,7 +3143,6 @@ def delete_ticket(conn: psycopg2.extensions.connection, ticket_id: int) -> None:
 
     _cur.close()
     conn.commit()
-    _invalidate_cache()
 
 
 def transfer_ticket(conn: psycopg2.extensions.connection, ticket_id: int, nova_categoria: str, categoria_origem: str, responsavel: str) -> tuple[bool, str]:
@@ -3226,7 +3168,6 @@ def transfer_ticket(conn: psycopg2.extensions.connection, ticket_id: int, nova_c
         )
         _cur2.close()
         conn.commit()
-        _invalidate_cache()
         return True, "Ticket transferido com sucesso!"
     except Exception as e:
         return False, f"Erro ao transferir: {e}"
@@ -3674,7 +3615,7 @@ def authenticate(username: str, password: str):
         return None
     finally:
         if conn:
-            release_pg_conn(conn)
+            conn.close()
 
 
 def create_user(username: str, password: str, full_name: str, role: str = 'analista') -> bool:
@@ -3695,7 +3636,7 @@ def create_user(username: str, password: str, full_name: str, role: str = 'anali
         return False
     finally:
         if conn:
-            release_pg_conn(conn)
+            conn.close()
 
 
 def delete_user(user_id: int, current_user_id: int, current_user_role: str = 'admin') -> tuple[bool, str]:
@@ -3729,7 +3670,7 @@ def delete_user(user_id: int, current_user_id: int, current_user_role: str = 'ad
         return False, f'Erro ao excluir usuário: {e}'
     finally:
         if conn:
-            release_pg_conn(conn)
+            conn.close()
 
 
 def ensure_auth_state():
@@ -6913,7 +6854,7 @@ def render_category(name: str, key: str, emoji_icon: str):
 if 'db_initialized' not in st.session_state:
     try:
         _boot_conn = init_db()
-        release_pg_conn(_boot_conn)
+        _boot_conn.close()
         st.session_state['db_initialized'] = True
     except Exception as _boot_err:
         st.error(
