@@ -6913,7 +6913,7 @@ def render_category(name: str, key: str, emoji_icon: str):
 if 'db_initialized' not in st.session_state:
     try:
         _boot_conn = init_db()
-        _boot_release_pg_conn(conn)
+        release_pg_conn(_boot_conn)
         st.session_state['db_initialized'] = True
     except Exception as _boot_err:
         st.error(
