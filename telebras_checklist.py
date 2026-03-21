@@ -3747,14 +3747,14 @@ def render_observacoes_html(text: str) -> str:
     return ''.join(blocks)
 
 
+@st.cache_data(ttl=3, show_spinner=False)
 def find_exact_ticket_match(query: str):
     q = (query or '').strip()
     if not q:
         return None
     try:
-        conn = init_db()
+        conn = get_pg_conn()
         _cur = conn.cursor()
-
         _cur.execute(
             """
             SELECT id, category, ticket_number
@@ -3766,10 +3766,9 @@ def find_exact_ticket_match(query: str):
             """,
             (q, q),
         )
-
         row = _cur.fetchone()
-
         _cur.close()
+        conn.close()
         if row:
             return {"id": row[0], "category": row[1], "ticket_number": row[2]}
     except Exception:
@@ -4257,7 +4256,7 @@ def render_login_page():
                 loader_slot.empty()
                 if user:
                     _client_ip = get_client_ip()
-                    log_audit(None, user['id'], user['username'], "login", _client_ip)
+                    import threading; threading.Thread(target=log_audit, args=(None, user['id'], user['username'], "login", _client_ip), daemon=True).start()
                     st.session_state.user = user
                     st.session_state.logged_in = True
                     st.session_state.last_activity = datetime.now()
@@ -4363,7 +4362,7 @@ def render_change_password_page():
 
 
 def render_users_management():
-    conn = init_db()
+    conn = get_pg_conn()
     current_user = st.session_state.user or {}
     current_role = current_user.get('role', 'analista')
     # Roles com permissões de superadmin (acesso total)
@@ -4698,7 +4697,7 @@ def render_users_management():
 
 def render_audit_page():
     st.session_state.last_activity = datetime.now()
-    conn = init_db()
+    conn = get_pg_conn()
     import streamlit.components.v1 as _comp
 
     # -- Cabeçalho limpo
@@ -4928,7 +4927,7 @@ def render_search_results():
         st.info("Digite algo no campo de busca da barra lateral.")
         return
 
-    conn = init_db()
+    conn = get_pg_conn()
     like = f"%{query}%"
     _cur = conn.cursor()
 
@@ -5258,7 +5257,7 @@ def render_app_sidebar():
 
 def render_dashboard():
     st.session_state.last_activity = datetime.now()
-    conn = init_db()
+    conn = get_pg_conn()
 
     categories = [key for _, key, _ in CATEGORIES if key != "dashboard"]
     counts = get_counts_by_category(conn)
@@ -5855,7 +5854,7 @@ def render_category(name: str, key: str, emoji_icon: str):
     """, unsafe_allow_html=True)
     base_key = key  # usado para IDs/keys internos da categoria
     # Sempre abre conexão aqui para evitar NameError quando o usuário navega nas categorias
-    conn = init_db()
+    conn = get_pg_conn()
     # Estado por categoria (evita botão 'Novo Ticket' não responder por colisão de keys entre páginas)
     show_key = f"show_new__{key}"
     edit_key = f"editing_id__{key}"
@@ -6887,26 +6886,20 @@ if 'db_initialized' not in st.session_state:
 ensure_auth_state()
 fetch_client_ip_js()  # Captura IP externo via JS uma vez por sessão
 
-# Keep-alive: atualiza last_activity em cada interação do usuário
-if st.session_state.get('logged_in'):
+# Keep-alive: injeta script JS apenas uma vez por sessão
+if st.session_state.get('logged_in') and not st.session_state.get('ka_injected'):
+    st.session_state['ka_injected'] = True
     import streamlit.components.v1 as _ka_comp
-    if 'ka_injected' not in st.session_state:
-        st.session_state['ka_injected'] = True
     _ka_comp.html(
         """<script>
-        // Keep-alive: envia evento a cada 4 minutos para manter a sessão ativa
         (function(){
           if(window._kaTimer) return;
           window._kaTimer = setInterval(function(){
-            try {
-              // Dispara um evento de movimento para sinalizar atividade
-              window.parent.document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true}));
-            } catch(e){}
+            try { window.parent.document.dispatchEvent(new MouseEvent('mousemove',{bubbles:true})); } catch(e){}
           }, 240000);
         })();
         </script>""",
-        height=0,
-        scrolling=False,
+        height=0, scrolling=False,
     )
 
 if not st.session_state.logged_in:
