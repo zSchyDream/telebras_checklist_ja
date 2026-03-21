@@ -2366,12 +2366,28 @@ def get_database_url() -> str:
     return url
 
 
-def get_pg_conn() -> psycopg2.extensions.connection:
-    """Retorna uma conexão psycopg2 com o Neon PostgreSQL."""
+@st.cache_resource(show_spinner=False)
+def _get_connection_pool():
+    """Pool de conexões persistente — criado uma vez por sessão do servidor."""
+    from psycopg2 import pool as pg_pool
     url = get_database_url()
-    conn = psycopg2.connect(url)
+    return pg_pool.ThreadedConnectionPool(minconn=1, maxconn=5, dsn=url)
+
+def get_pg_conn() -> psycopg2.extensions.connection:
+    """Retorna uma conexão do pool (muito mais rápido que abrir nova conexão)."""
+    _pool = _get_connection_pool()
+    conn = _pool.getconn()
     conn.autocommit = False
     return conn
+
+def release_pg_conn(conn) -> None:
+    """Devolve a conexão ao pool após uso."""
+    try:
+        if conn and not conn.closed:
+            conn.rollback()
+            _get_connection_pool().putconn(conn)
+    except Exception:
+        pass
 
 STATUS_OPTS = ["Aberto", "Em andamento", "Fechado"]
 CRIT_OPTS = ["Baixa", "Média", "Alta", "Crítica"]
@@ -2488,7 +2504,44 @@ def build_shift_handoff_text(tickets: List[Dict[str, Any]], name: str, meta: Dic
 
 
 
+@st.cache_data(ttl=4, show_spinner=False)
+def fetch_all_tickets_cached() -> List[Dict[str, Any]]:
+    """Todos os tickets cacheados por 4 segundos."""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        _cur = conn.cursor()
+        _cur.execute(
+            """
+            SELECT id, category, ticket_number, status, criticidade, responsavel, equipamento,
+                   id_estacao, descricao, acao_tomada, pendencia, criterios, politica, correlatos,
+                   observacoes, extra, created_at
+            FROM tickets
+            ORDER BY id DESC
+            """
+        )
+        rows = _cur.fetchall()
+        _cur.close()
+        cols = [
+            "id","category","ticket_number","status","criticidade","responsavel","equipamento","id_estacao",
+            "descricao","acao_tomada","pendencia","criterios","politica","correlatos","observacoes","extra","created_at"
+        ]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            try:
+                d["extra"] = json.loads(d["extra"]) if d.get("extra") else {}
+            except Exception:
+                d["extra"] = {}
+            out.append(d)
+        return out
+    finally:
+        release_pg_conn(conn)
+
 def fetch_all_tickets(conn: psycopg2.extensions.connection) -> List[Dict[str, Any]]:
+    return fetch_all_tickets_cached()
+
+def _fetch_all_orig(conn):
     _cur = conn.cursor()
 
     _cur.execute(
@@ -2797,11 +2850,21 @@ def _ensure_schema(conn) -> None:
     cur.close()
 
 
-def init_db():
-    """Abre conexão, garante schema e retorna a conexão."""
+@st.cache_resource(show_spinner=False)
+def _schema_initialized():
+    """Garante que o schema foi criado — roda apenas uma vez por instância do servidor."""
     conn = get_pg_conn()
-    _ensure_schema(conn)
-    return conn
+    try:
+        _ensure_schema(conn)
+        conn.commit()
+    finally:
+        release_pg_conn(conn)
+    return True
+
+def init_db():
+    """Garante schema (cacheado) e retorna nova conexão do pool."""
+    _schema_initialized()
+    return get_pg_conn()
 
 
 def get_client_ip() -> Optional[str]:
@@ -2920,30 +2983,119 @@ def log_audit(
         pass
     finally:
         if _conn:
-            _conn.close()
+            _release_pg_conn(conn)
 
+
+@st.cache_data(ttl=4, show_spinner=False)
+def fetch_counts_cached() -> Dict[str, int]:
+    """Query cacheada por 4 segundos — evita round-trips desnecessários ao Neon."""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        out = {k: 0 for _, k, _ in CATEGORIES if k != "dashboard"}
+        _cur = conn.cursor()
+        _cur.execute("SELECT category, COUNT(*) FROM tickets GROUP BY category")
+        rows = _cur.fetchall()
+        _cur.close()
+        for cat, c in rows:
+            out[cat] = int(c)
+        return out
+    finally:
+        release_pg_conn(conn)
 
 def fetch_counts(conn: psycopg2.extensions.connection) -> Dict[str, int]:
-    out = {k: 0 for _, k, _ in CATEGORIES if k != "dashboard"}
-    _cur = conn.cursor()
-
-    _cur.execute("SELECT category, COUNT(*) FROM tickets GROUP BY category")
-
-    rows = _cur.fetchall()
-
-    _cur.close()
-    for cat, c in rows:
-        out[cat] = int(c)
-    return out
+    return fetch_counts_cached()
 
 
 def get_counts_by_category(conn: psycopg2.extensions.connection) -> Dict[str, int]:
     """Compat helper (older dashboard code)."""
     return fetch_counts(conn)
 
-def fetch_tickets(conn: psycopg2.extensions.connection, category: str) -> List[Dict[str, Any]]:
-    _cur = conn.cursor()
+@st.cache_data(ttl=4, show_spinner=False)
+def fetch_tickets_cached(category: str) -> List[Dict[str, Any]]:
+    """Tickets por categoria cacheados por 4 segundos."""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        _cur = conn.cursor()
+        _cur.execute(
+            """
+            SELECT id, category, ticket_number, status, criticidade, responsavel, equipamento,
+                   id_estacao, descricao, acao_tomada, pendencia, criterios, politica, correlatos,
+                   observacoes, extra, created_at
+            FROM tickets
+            WHERE category = %s
+            ORDER BY id DESC
+            """,
+            (category,),
+        )
+        rows = _cur.fetchall()
+        _cur.close()
+        cols = [
+            "id","category","ticket_number","status","criticidade","responsavel","equipamento","id_estacao",
+            "descricao","acao_tomada","pendencia","criterios","politica","correlatos","observacoes","extra","created_at",
+        ]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            try:
+                d["extra"] = json.loads(d["extra"]) if d.get("extra") else {}
+            except Exception:
+                d["extra"] = {}
+            out.append(d)
+        return out
+    finally:
+        release_pg_conn(conn)
 
+def fetch_tickets(conn: psycopg2.extensions.connection, category: str) -> List[Dict[str, Any]]:
+    return fetch_tickets_cached(category)
+
+def _invalidate_cache():
+    """Invalida todos os caches de leitura após escrita."""
+    fetch_counts_cached.clear()
+    fetch_tickets_cached.clear()
+    try:
+        fetch_all_tickets_cached.clear()
+    except Exception:
+        pass
+
+def fetch_tickets_fresh(category: str) -> List[Dict[str, Any]]:
+    """Busca tickets sem cache — usar após salvar/editar/deletar."""
+    conn = None
+    try:
+        conn = get_pg_conn()
+        _cur = conn.cursor()
+        _cur.execute(
+            """
+            SELECT id, category, ticket_number, status, criticidade, responsavel, equipamento,
+                   id_estacao, descricao, acao_tomada, pendencia, criterios, politica, correlatos,
+                   observacoes, extra, created_at
+            FROM tickets
+            WHERE category = %s
+            ORDER BY id DESC
+            """,
+            (category,),
+        )
+        rows = _cur.fetchall()
+        _cur.close()
+        cols = [
+            "id","category","ticket_number","status","criticidade","responsavel","equipamento","id_estacao",
+            "descricao","acao_tomada","pendencia","criterios","politica","correlatos","observacoes","extra","created_at",
+        ]
+        out = []
+        for r in rows:
+            d = dict(zip(cols, r))
+            try:
+                d["extra"] = json.loads(d["extra"]) if d.get("extra") else {}
+            except Exception:
+                d["extra"] = {}
+            out.append(d)
+        return out
+    finally:
+        release_pg_conn(conn)
+
+def _orig_fetch_tickets(conn, category):
+    _cur = conn.cursor()
     _cur.execute(
         """
         SELECT id, category, ticket_number, status, criticidade, responsavel, equipamento,
@@ -3047,6 +3199,7 @@ def upsert_ticket(conn: psycopg2.extensions.connection, payload: Dict[str, Any],
         )
     cur.close()
     conn.commit()
+    _invalidate_cache()
 
 def delete_ticket(conn: psycopg2.extensions.connection, ticket_id: int) -> None:
     _cur = conn.cursor()
@@ -3055,6 +3208,7 @@ def delete_ticket(conn: psycopg2.extensions.connection, ticket_id: int) -> None:
 
     _cur.close()
     conn.commit()
+    _invalidate_cache()
 
 
 def transfer_ticket(conn: psycopg2.extensions.connection, ticket_id: int, nova_categoria: str, categoria_origem: str, responsavel: str) -> tuple[bool, str]:
@@ -3080,6 +3234,7 @@ def transfer_ticket(conn: psycopg2.extensions.connection, ticket_id: int, nova_c
         )
         _cur2.close()
         conn.commit()
+        _invalidate_cache()
         return True, "Ticket transferido com sucesso!"
     except Exception as e:
         return False, f"Erro ao transferir: {e}"
@@ -3527,7 +3682,7 @@ def authenticate(username: str, password: str):
         return None
     finally:
         if conn:
-            conn.close()
+            release_pg_conn(conn)
 
 
 def create_user(username: str, password: str, full_name: str, role: str = 'analista') -> bool:
@@ -3548,7 +3703,7 @@ def create_user(username: str, password: str, full_name: str, role: str = 'anali
         return False
     finally:
         if conn:
-            conn.close()
+            release_pg_conn(conn)
 
 
 def delete_user(user_id: int, current_user_id: int, current_user_role: str = 'admin') -> tuple[bool, str]:
@@ -3582,7 +3737,7 @@ def delete_user(user_id: int, current_user_id: int, current_user_role: str = 'ad
         return False, f'Erro ao excluir usuário: {e}'
     finally:
         if conn:
-            conn.close()
+            release_pg_conn(conn)
 
 
 def ensure_auth_state():
@@ -6766,7 +6921,7 @@ def render_category(name: str, key: str, emoji_icon: str):
 if 'db_initialized' not in st.session_state:
     try:
         _boot_conn = init_db()
-        _boot_conn.close()
+        _boot_release_pg_conn(conn)
         st.session_state['db_initialized'] = True
     except Exception as _boot_err:
         st.error(
