@@ -2975,7 +2975,7 @@ def log_audit(
         pass
     finally:
         if _conn:
-            _release_pg_conn(conn)
+            release_pg_conn(_conn)
 
 
 @st.cache_data(ttl=4, show_spinner=False)
